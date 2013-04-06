@@ -1,6 +1,6 @@
 bl_info = {
-    "name":         "ZED Model",
-    "author":       "Rico Tyrell",
+    "name":         "0 ZED Model",
+    "author":       "Open Game Developers",
     "blender":      ( 2, 6, 2 ),
     "version":      ( 0, 0, 1 ),
     "location":     "File > Import-Export",
@@ -8,8 +8,10 @@ bl_info = {
     "category":     "Import-Export"
 }
 
-import bpy
+import bpy;
 import struct;
+import io;
+import os;
 from bpy_extras.io_utils import ExportHelper
 
 def menu_func( self, context ):
@@ -24,7 +26,7 @@ def unregister( ):
     bpy.types.INFO_MT_file_export.remove( menu_func );
 
 if __name__ == "__main__":
-    register( )
+    register( );
     
 class ZEDFileHeader:
     numVertices = 0;
@@ -36,7 +38,6 @@ class ZEDFileHeader:
         self.numIndices = numIndices;
     
     def write( self, file ):
-        #file.write( "Size: %d | Vertices: %d | Indices: %d\n" % ( self.sizeInBytes, self.numVertices, self.numIndices ) );
         file.write( struct.pack( 'cccc', b'Z', b'E', b'D', b'M' ) );
         file.write( struct.pack( 'BBB', 0, 0, 1 ) );
         file.write( struct.pack( 'BBBB', 0, 0, 0, 0 ) );
@@ -51,11 +52,9 @@ class ZEDFileBody:
     def write( self, file ):
         for vert in self.mesh.vertices:
             x, y, z = vert.co;
-            #file.write( 'Vertex: %f %f %f\n' % (x, y, z ) );#( vert.co[ 0 ], vert.co[ 1 ], vert.co[ 2 ] ) );
             file.write( struct.pack( 'fff', vert.co[ 0 ], vert.co[ 1 ], vert.co[ 2 ] ) );
         for tri in self.tri_list:
             x, y, z = tri.vertex_indices;
-            #file.write( 'Index: %d %d %d\n' % ( x, y, z ) );#( tri.vertex_indices[ 0 ], tri.vertex_indices[ 1 ], tri.vertex_indixes[ 2 ] ) );
             file.write( struct.pack( 'hhh', tri.vertex_indices[ 0 ], tri.vertex_indices[ 1 ], tri.vertex_indices[ 2 ] ) );
 
 class TriangleWrapper( object ):
@@ -98,36 +97,91 @@ class Exporter( bpy.types.Operator, ExportHelper ):
         fileBody = ZEDFileBody( ob.data );
         fileBody.tri_list = self.extract_triangles( fileBody.mesh );
         
-        fileHeader = ZEDFileHeader(
-            len( fileBody.mesh.vertices ),
+        fileHeader = ZEDFileHeader( len( fileBody.mesh.vertices ),
             len( fileBody.tri_list ) * 3 );
         
-        file = open( self.filepath, 'wb' );#, encoding='utf8' );
+        file = open( self.filepath, 'wb' );
         fileHeader.write( file );
         fileBody.write( file );
-        WriteModelMetaChunk( fileBody.mesh, file, len( fileBody.tri_list )*3, len( fileBody.tri_list ) );
+        WriteModelMetaChunk( file, fileBody.mesh, len( fileBody.tri_list )*3,
+            len( fileBody.tri_list ) );
+        WriteMeshChunks( file, fileBody.mesh );
         file.close( );
         return result;
 
-def WriteModelMetaChunk( Mesh, File, IndexCount, TriCount ):
+def WriteModelMetaChunk( File, Mesh, IndexCount, TriCount ):
+    File.write( struct.pack( "H", 0x0001 ) );
+    File.write( struct.pack( "Q", 0 ) );
+    FileSize = 0;
     File.write( struct.pack( "I", len( Mesh.vertices ) ) );
+    FileSize += 4;
     File.write( struct.pack( "I", IndexCount ) );
+    FileSize += 4;
     # Only one mesh, must look into exporting all meshes...
     File.write( struct.pack( "I", 1 ) );
+    FileSize += 4;
     # No materials right now...
     File.write( struct.pack( "I", 0 ) );
+    FileSize += 4;
     File.write( struct.pack( "cccc", b'C', b'u', b'b', b'e' ) );
     for x in range( 0, 60 ):
         File.write( struct.pack( "c", b'\0' ) );
+    FileSize += 64;
     # No strips
     File.write( struct.pack( "II", 0, 0 ) );
+    FileSize += 8;
     # Lists
     File.write( struct.pack( "II", TriCount, TriCount ) );
+    FileSize += 8;
     # No fans
     File.write( struct.pack( "II", 0, 0 ) );
+    FileSize += 8;
     File.write( struct.pack( "BBB", 0, 0, 1 ) );
+    FileSize += 3;
+    File.seek( -( FileSize+8 ), 1 );
+    File.write( struct.pack( "Q", FileSize ) );
+    File.seek( FileSize, 1 );
+    WriteChunkEnd( File );
+    
+def WriteMeshChunks( File, Mesh ):
+    File.write( struct.pack( "H", 0x0002 ) );
+    File.write( struct.pack( "Q", 0 ) );
+    FileSize = 0;
+    # Vertex Count
+    File.write( struct.pack( "I", len( Mesh.vertices ) ) );
+    FileSize += 4;
+    # Material ID
+    File.write( struct.pack( "I", 0 ) );
+    FileSize += 4;
+    # Strips
+    File.write( struct.pack( "I", 0 ) );
+    FileSize += 4;
+    # Lists
+    File.write( struct.pack( "I", 1 ) );
+    FileSize += 4;
+    # Fans
+    File.write( struct.pack( "I", 0 ) );
+    FileSize += 4;
+    # Write out vertices...
+    for vert in Mesh.vertices:
+        File.write( struct.pack( "fff", vert.co[ 0 ], vert.co[ 1 ], vert.co[ 2 ] ) );
+        FileSize += 12;
+    # Write out strips, lists, and fans (only lists will be output for now)
+    # Amount of indices in list array
+    File.write( struct.pack( "I", 36 ) );
+    for face in Mesh.polygons:
+        face_verts = face.vertices;
+        if len( face.vertices ) == 3:
+            File.write( struct.pack( "HHH", face_verts[ 0 ], face_verts[ 1 ], face_verts[ 2 ] ) );
+            FileSize += 6;
+        else:
+            File.write( struct.pack( "HHH", face_verts[ 0 ], face_verts[ 1 ], face_verts[ 2 ] ) );
+            File.write( struct.pack( "HHH", face_verts[ 0 ], face_verts[ 2 ], face_verts[ 3 ] ) );
+            FileSize += 12;
+    File.seek( -( FileSize+8 ), 1 );
+    File.write( struct.pack( "Q", FileSize ) );
+    File.seek( FileSize, 1 );
+    WriteChunkEnd( File );
 
-    
-#def WriteVertexChunks( ):
-    
-#def WriteMeshChunks( ):
+def WriteChunkEnd( File ):
+    File.write( struct.pack( "HQ", 0xFFFF, 0 ) );
